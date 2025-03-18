@@ -12,6 +12,7 @@ from kivy.properties import ObjectProperty, StringProperty
 from kivy.uix.checkbox import CheckBox  # noqa: F401 - Used in kv file
 import json
 import os
+from kivy.utils import platform
 
 # Data models
 
@@ -92,12 +93,16 @@ class DataManager:
         self.load_data()
 
     def get_data_path(self):
-        # Get the user's home directory
-        home_dir = os.path.expanduser("~")
-        # Create a subdirectory for our app
-        app_dir = os.path.join(home_dir, ".flashcard_app")
-        # Return the full path to our data file
-        return os.path.join(app_dir, self.filename)
+        if platform == "android":
+            from android.storage import primary_external_storage_path
+
+            storage_path = primary_external_storage_path()
+            data_dir = os.path.join(storage_path, "flashcardapp")
+        else:
+            data_dir = os.path.expanduser("~/.flashcardapp")
+
+        os.makedirs(data_dir, exist_ok=True)
+        return os.path.join(data_dir, "flashcards.json")
 
     def load_data(self):
         try:
@@ -181,8 +186,9 @@ class DataManager:
     def get_current_deck(self):
         key = (self.current_folder_index, self.current_deck_index)
         if self._current_deck_key != key:
-            if (0 <= self.current_folder_index < len(self.folders) and 
-                0 <= self.current_deck_index < len(self.folders[self.current_folder_index].decks)):
+            if 0 <= self.current_folder_index < len(self.folders) and 0 <= self.current_deck_index < len(
+                self.folders[self.current_folder_index].decks
+            ):
                 self._current_deck_cache = self.folders[self.current_folder_index].decks[self.current_deck_index]
                 self._current_deck_key = key
             else:
@@ -469,39 +475,22 @@ class DeckScreen(Screen):
     def update_card_list(self):
         self.card_list.clear_widgets()
         deck = self.data_manager.folders[self.folder_index].decks[self.deck_index]
-        
+
         # Add deck name label
-        deck_name = Label(
-            text=f"[b]{deck.name}[/b]",
-            markup=True,
-            size_hint_y=None,
-            height='40dp'
-        )
+        deck_name = Label(text=f"[b]{deck.name}[/b]", markup=True, size_hint_y=None, height="40dp")
         self.card_list.add_widget(deck_name)
-        
+
         # Pagination variables
         page_size = 10
-        start_idx = getattr(self, 'start_idx', 0)  # Get current page start index
-        
+        start_idx = getattr(self, "start_idx", 0)  # Get current page start index
+
         # Create navigation layout
-        nav_layout = BoxLayout(
-            size_hint_y=None,
-            height='40dp',
-            spacing=10
-        )
-        
-        prev_btn = Button(
-            text="Previous",
-            disabled=(start_idx == 0),
-            size_hint_x=0.5
-        )
-        
-        next_btn = Button(
-            text="Next",
-            disabled=(start_idx + page_size >= len(deck.cards)),
-            size_hint_x=0.5
-        )
-        
+        nav_layout = BoxLayout(size_hint_y=None, height="40dp", spacing=10)
+
+        prev_btn = Button(text="Previous", disabled=(start_idx == 0), size_hint_x=0.5)
+
+        next_btn = Button(text="Next", disabled=(start_idx + page_size >= len(deck.cards)), size_hint_x=0.5)
+
         def on_prev(instance):
             self.start_idx = max(0, start_idx - page_size)
             self.update_card_list()
@@ -512,7 +501,7 @@ class DeckScreen(Screen):
 
         prev_btn.bind(on_release=on_prev)
         next_btn.bind(on_release=on_next)
-        
+
         nav_layout.add_widget(prev_btn)
         nav_layout.add_widget(next_btn)
         self.card_list.add_widget(nav_layout)
@@ -521,48 +510,37 @@ class DeckScreen(Screen):
         end_idx = min(start_idx + page_size, len(deck.cards))
         for i in range(start_idx, end_idx):
             card = deck.cards[i]
-            
+
             # Create card layout with more height for buttons
             card_layout = BoxLayout(
-                orientation='horizontal',
-                size_hint_y=None,
-                height='50dp',
-                spacing=5,
-                padding=[0, 5]
+                orientation="horizontal", size_hint_y=None, height="50dp", spacing=5, padding=[0, 5]
             )
-            
+
             # Add card content
-            card_label = Label(
-                text=f"Q: {card.question[:50]}... | A: {card.answer[:50]}...",
-                size_hint_x=0.6
-            )
-            
+            card_label = Label(text=f"Q: {card.question[:50]}... | A: {card.answer[:50]}...", size_hint_x=0.6)
+
             # Create status buttons layout
-            status_layout = BoxLayout(
-                orientation='horizontal',
-                size_hint_x=0.25,
-                spacing=2
-            )
-            
+            status_layout = BoxLayout(orientation="horizontal", size_hint_x=0.25, spacing=2)
+
             # Status indicator and buttons
             status_colors = {
                 "new": [0.7, 0.7, 0.7, 1],  # Gray
                 "know": [0.2, 0.8, 0.2, 1],  # Green
-                "dont_know": [0.8, 0.2, 0.2, 1]  # Red
+                "dont_know": [0.8, 0.2, 0.2, 1],  # Red
             }
-            
+
             def create_status_button(status_type, card_idx):
                 btn = Button(
-                    text=status_type.replace('_', ' ').title(),
-                    size_hint_x=1/3,
-                    background_color=status_colors[status_type]
+                    text=status_type.replace("_", " ").title(),
+                    size_hint_x=1 / 3,
+                    background_color=status_colors[status_type],
                 )
-                
+
                 def on_status_press(instance):
                     deck.cards[card_idx].status = status_type
                     self.data_manager.save_data()
                     self.update_card_list()
-                
+
                 btn.bind(on_release=on_status_press)
                 return btn
 
@@ -572,22 +550,19 @@ class DeckScreen(Screen):
                 # Highlight the current status
                 if card.status == status:
                     btn.bold = True
-                    btn.background_normal = ''
+                    btn.background_normal = ""
                 status_layout.add_widget(btn)
-            
+
             # Add edit button
-            edit_btn = Button(
-                text="Edit",
-                size_hint_x=0.15
-            )
+            edit_btn = Button(text="Edit", size_hint_x=0.15)
             edit_btn.card_index = i
             edit_btn.bind(on_release=self.edit_card)
-            
+
             # Add all widgets to card layout
             card_layout.add_widget(card_label)
             card_layout.add_widget(status_layout)
             card_layout.add_widget(edit_btn)
-            
+
             self.card_list.add_widget(card_layout)
 
     def edit_card(self, instance):
@@ -699,9 +674,7 @@ class DeckScreen(Screen):
 
         if not has_dont_know:
             popup = Popup(
-                title="No Cards",
-                content=Label(text='There are no "Don\'t Know" cards to study.'),
-                size_hint=(0.7, 0.3)
+                title="No Cards", content=Label(text='There are no "Don\'t Know" cards to study.'), size_hint=(0.7, 0.3)
             )
             popup.open()
             return
@@ -720,11 +693,11 @@ class DeckScreen(Screen):
         self.data_manager.set_current_folder_deck(self.folder_index, self.deck_index)
 
         # Go to study screen with answer side first
-        study_screen = self.manager.get_screen('study')
+        study_screen = self.manager.get_screen("study")
         study_screen.show_question_side = False  # This will make it show answers first
         study_screen.show_card_side = True  # Start with showing the answer
         study_screen.setup_session()
-        self.manager.current = 'study'
+        self.manager.current = "study"
 
     def bulk_reset(self):
         deck = self.data_manager.folders[self.folder_index].decks[self.deck_index]
@@ -752,7 +725,7 @@ class DeckScreen(Screen):
 class StudyScreen(Screen):
     card_display = ObjectProperty(None)
     progress_label = ObjectProperty(None)
-    
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.data_manager = App.get_running_app().data_manager
@@ -812,24 +785,23 @@ class StudyScreen(Screen):
             # Reset session state
             self.current_index = 0
             self.history = []
-            
+
             # Filter cards if needed
             if filter_status:
-                self.card_indices = [i for i, card in enumerate(deck.cards) 
-                                   if card.status == filter_status]
+                self.card_indices = [i for i, card in enumerate(deck.cards) if card.status == filter_status]
             else:
                 self.card_indices = list(range(len(deck.cards)))
-            
+
             # Set initial card side based on show_question_side
             self.show_card_side = True
-            
+
             # Start with the first card
             self.update_display()
 
     def update_display(self):
         deck = self.data_manager.get_current_deck()
         if not deck or not self.card_indices:
-            self.manager.current = 'deck'
+            self.manager.current = "deck"
             return
 
         if 0 <= self.current_index < len(self.card_indices):
@@ -865,7 +837,7 @@ class StudyScreen(Screen):
             self.current_index += 1
             # Reset to show the initial side based on study mode
             self.show_card_side = True
-            
+
             # Check if we've reached the end
             if self.current_index >= len(self.card_indices):
                 self.show_summary()
@@ -932,6 +904,12 @@ class StudyScreen(Screen):
 # App Layout
 class FlashcardApp(App):
     def build(self):
+        # Request Android permissions if needed
+        if platform == "android":
+            from android.permissions import request_permissions, Permission
+
+            request_permissions([Permission.READ_EXTERNAL_STORAGE, Permission.WRITE_EXTERNAL_STORAGE])
+
         # Initialize data manager
         self.data_manager = DataManager()
 
@@ -946,7 +924,8 @@ class FlashcardApp(App):
         sm.add_widget(ImportCardsScreen(name="import"))
 
         # Bind keyboard events for study screen
-        Window.bind(on_key_down=self.on_key_down)
+        if platform != "android":  # Only bind keyboard on desktop
+            Window.bind(on_key_down=self.on_key_down)
 
         return sm
 
@@ -975,6 +954,14 @@ class FlashcardApp(App):
                 return True
 
         return False
+
+    def on_pause(self):
+        # This is important for Android to prevent the app from being killed when paused
+        return True
+
+    def on_resume(self):
+        # Handle app resume on Android
+        pass
 
 
 # Add kv file content
