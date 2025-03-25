@@ -904,6 +904,8 @@ class StudyScreen(Screen):
 # App Layout
 class FlashcardApp(App):
     def build(self):
+        Window.size = (1600, 1400)  # Add this line to set window size
+
         # Request Android permissions if needed
         if platform == "android":
             from android.permissions import request_permissions, Permission
