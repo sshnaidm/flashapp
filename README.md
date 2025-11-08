@@ -18,7 +18,7 @@ The APK will be created in the `bin/` directory.
 
 The build script uses Docker/Podman to create a containerized build environment with:
 - Java 17 (required for Android Gradle plugin)
-- Android SDK API 33
+- Android SDK API 35
 - Android NDK r25b
 - Python 3 and buildozer
 

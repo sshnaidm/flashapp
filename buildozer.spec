@@ -5,7 +5,9 @@ package.domain = org.flashcard
 
 source.dir = .
 source.include_exts = py,png,jpg,kv,atlas,json
-source.include_patterns = main.py,flashcard_app.py
+# Include all files with extensions listed above from source.dir
+# Note: Commenting out include_patterns to allow all files with matching extensions
+# source.include_patterns = main.py,flashcard_app.py
 
 version = 1.0
 
@@ -17,11 +19,17 @@ requirements = python3,\
     pillow
 
 # Android specific
-android.permissions = WRITE_EXTERNAL_STORAGE,READ_EXTERNAL_STORAGE
-android.api = 33
+# READ_EXTERNAL_STORAGE: Required for file import functionality
+# Note: On Android 11+ (API 30+), this permission has limited effect due to scoped storage.
+# File browsing may be restricted. For full file access on Android 11+, consider:
+# 1. Using Android's file picker Intent (Storage Access Framework)
+# 2. Requesting MANAGE_EXTERNAL_STORAGE (only for file manager apps)
+# 3. Limiting imports to app-specific directories or Downloads folder
+android.permissions = READ_EXTERNAL_STORAGE
+android.api = 35
 android.minapi = 21
 android.ndk = 25b
-android.sdk = 33
+android.sdk = 35
 android.presplash.filename = %(source.dir)s/presplash.png
 android.icon.filename = %(source.dir)s/icon.png
 android.accept_sdk_license = True
@@ -40,7 +48,10 @@ android.logcat_filters = *:S python:D
 android.copy_libs = 1
 
 # (str) The Android arch to build for, choices: armeabi-v7a, arm64-v8a, x86, x86_64
-android.archs = armeabi-v7a
+# Building for both 32-bit and 64-bit ARM to support all devices and comply with Play Store requirements
+android.archs = arm64-v8a, armeabi-v7a
+
+# Target API 35 (Android 15) - REQUIRED for Play Store as of August 31, 2025
 
 # (int) overrides automatic versionCode computation (used in build.gradle)
 # this is not the same as app version and should only be edited if you know what you're doing
@@ -54,7 +65,8 @@ log_level = 2
 warn_on_root = 1
 
 # (str) Path to build artifact storage, absolute or relative to spec file
-build_dir = ./.buildozer
+# Use absolute path to match the container mount point for caching
+build_dir = /home/builduser/.buildozer
 
 # (str) Path to build output (i.e. .apk, .aab, .ipa) storage
 bin_dir = ./bin

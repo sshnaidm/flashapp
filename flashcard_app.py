@@ -94,10 +94,10 @@ class DataManager:
 
     def get_data_path(self):
         if platform == "android":
-            from android.storage import primary_external_storage_path
-
-            storage_path = primary_external_storage_path()
-            data_dir = os.path.join(storage_path, "flashcardapp")
+            # Use app-specific storage (works with scoped storage on Android 11+)
+            # This doesn't require any storage permissions
+            from kivy.app import App
+            data_dir = App.get_running_app().user_data_dir
         else:
             data_dir = os.path.expanduser("~/.flashcardapp")
 
@@ -906,11 +906,11 @@ class FlashcardApp(App):
     def build(self):
         Window.size = (1600, 1400)  # Add this line to set window size
 
-        # Request Android permissions if needed
+        # Request READ_EXTERNAL_STORAGE permission for file import functionality
         if platform == "android":
             from android.permissions import request_permissions, Permission
-
-            request_permissions([Permission.READ_EXTERNAL_STORAGE, Permission.WRITE_EXTERNAL_STORAGE])
+            # Only request READ (not WRITE) - write operations use app-specific storage
+            request_permissions([Permission.READ_EXTERNAL_STORAGE])
 
         # Initialize data manager
         self.data_manager = DataManager()
