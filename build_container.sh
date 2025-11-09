@@ -25,6 +25,10 @@ echo "Using container runtime: $CONTAINER_RUNTIME"
 # Create cache directories if they don't exist
 mkdir -p "$CACHE_DIR"
 mkdir -p "$GRADLE_CACHE_DIR"
+
+# Clean bin directory to ensure no old APKs remain if build fails
+echo "Cleaning bin directory..."
+rm -rf "$(pwd)/bin/*apk"
 mkdir -p "$(pwd)/bin"
 
 echo "Cache directories:"

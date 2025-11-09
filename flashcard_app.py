@@ -904,6 +904,10 @@ class StudyScreen(Screen):
 # App Layout
 class FlashcardApp(App):
     def build(self):
+        # Load the KV layout before building the UI
+        from kivy.lang import Builder
+        Builder.load_string(kv_content)
+
         Window.size = (1600, 1400)  # Add this line to set window size
 
         # Request READ_EXTERNAL_STORAGE permission for file import functionality
@@ -1275,7 +1279,4 @@ kv_content = """
 
 # Run the app
 if __name__ == "__main__":
-    from kivy.lang import Builder
-
-    Builder.load_string(kv_content)
     FlashcardApp().run()

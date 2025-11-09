@@ -18,16 +18,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     unzip \
     zip \
     autoconf \
+    automake \
     libtool \
+    libltdl-dev \
+    libffi-dev \
     pkg-config \
     zlib1g-dev \
     libncurses5-dev \
     libncursesw5-dev \
     libtinfo5 \
     cmake \
-    libffi-dev \
     libssl-dev \
     ccache \
+    patch \
+    make \
+    build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 # Set Java 17 as default
