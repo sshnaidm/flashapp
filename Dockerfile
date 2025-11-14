@@ -39,9 +39,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
 ENV PATH=$JAVA_HOME/bin:$PATH
 
-# Install buildozer and dependencies
+# Install buildozer and dependencies from requirements file
+COPY build-requirements.txt /tmp/
 RUN pip3 install --upgrade pip && \
-    pip3 install buildozer==1.5.0 cython==3.0.12
+    pip3 install -r /tmp/build-requirements.txt
 
 # Install Android SDK
 ENV ANDROID_HOME=/opt/android-sdk

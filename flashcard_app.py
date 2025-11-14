@@ -908,7 +908,10 @@ class FlashcardApp(App):
         from kivy.lang import Builder
         Builder.load_string(kv_content)
 
-        Window.size = (1600, 1400)  # Add this line to set window size
+        # Window.size = (1600, 1400)  # DISABLED: Causes threading/mutex crash on Android
+        # Fixed window size only works on desktop, on Android it causes rendering issues
+        if platform != "android":
+            Window.size = (1600, 1400)  # Only set window size on desktop
 
         # Request READ_EXTERNAL_STORAGE permission for file import functionality
         if platform == "android":

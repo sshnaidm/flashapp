@@ -64,15 +64,14 @@ $CONTAINER_RUNTIME run --name $CONTAINER_NAME \
     -e ANDROID_NDK_HOME=/opt/android-ndk-r25b \
     $IMAGE_NAME \
     bash -c '
-        # Copy source files to build directory
+        # Copy all source files to build directory, excluding build artifacts
         echo "Copying source files..."
-        find /src -maxdepth 1 -type f -name "*.py" -exec cp {} . \;
-        find /src -maxdepth 1 -type f -name "*.txt" -exec cp {} . \;
-        find /src -maxdepth 1 -type f -name "*.spec" -exec cp {} . \;
-        find /src -maxdepth 1 -type f -name "*.sh" -exec cp {} . \;
-        [ -d /src/.git ] && cp -r /src/.git . || true
+        cp -a /src/. .
 
-        # Create bin directory in build location
+        # Remove build artifacts and cache directories that should not be copied
+        rm -rf .buildozer .buildozer-cache .gradle-cache bin
+
+        # Create fresh bin directory for build output
         mkdir -p bin
 
         # Run buildozer

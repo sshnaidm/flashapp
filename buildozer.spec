@@ -12,8 +12,12 @@ source.include_exts = py,png,jpg,kv,atlas,json
 version = 1.0
 
 # Remove 'android' from requirements as it's not a Python package
+# IMPORTANT: DO NOT list 'kivy' in requirements!
+# When kivy is listed here, pip installs x86_64 wheels from PyPI BEFORE
+# python-for-android can build it from source, causing architecture mismatch errors.
+# The SDL2 bootstrap automatically includes Kivy and builds it correctly for ARM.
+# See: ANDROID_FIX_SUMMARY.md and ARCHITECTURE_FIX.md for details
 requirements = python3,\
-    kivy==2.3.1,\
     docutils,\
     pygments,\
     pillow
@@ -33,8 +37,11 @@ android.sdk = 35
 android.presplash.filename = %(source.dir)s/presplash.png
 android.icon.filename = %(source.dir)s/icon.png
 android.accept_sdk_license = True
-android.gradle_dependencies = androidx.core:core:1.7.0, androidx.appcompat:appcompat:1.5.1
+android.gradle_dependencies = androidx.core:core:1.7.0, androidx.appcompat:appcompat:1.5.1, com.google.android.material:material:1.8.0
 android.enable_androidx = True
+
+# Explicitly set SDL2 bootstrap for better graphics stability
+p4a.bootstrap = sdl2
 
 # (bool) If True, then skip trying to update the Android sdk
 # This can be useful to avoid excess Internet downloads or save time
@@ -42,7 +49,8 @@ android.enable_androidx = True
 android.skip_update = False
 
 # (str) Android logcat filters to use
-android.logcat_filters = *:S python:D
+# Changed to *:D for full debugging output to diagnose crashes
+android.logcat_filters = *:D
 
 # (bool) Copy library instead of making a libpymodules.so
 android.copy_libs = 1

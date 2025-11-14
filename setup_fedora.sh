@@ -12,7 +12,7 @@ sudo dnf install -y \
     python3-devel \
     gcc \
     git \
-    java-11-openjdk-devel \
+    java-17-openjdk-devel \
     android-tools \
     zlib-devel \
     SDL2-devel \
@@ -53,12 +53,11 @@ source "$BASHRC"
 # Install Android SDK packages
 echo "Installing Android SDK packages..."
 yes | sdkmanager --licenses
-sdkmanager "platforms;android-33" "build-tools;33.0.0" "platform-tools"
+sdkmanager "platforms;android-35" "build-tools;35.0.0" "platform-tools"
 
-# Install Python packages
+# Install Python packages from requirements file
 echo "Installing Python packages..."
-pip install --user buildozer
-pip install --user Cython==0.29.33
+pip install --user -r build-requirements.txt
 
 echo "Setup complete! Please restart your terminal or run:"
 echo "source ~/.bashrc"
