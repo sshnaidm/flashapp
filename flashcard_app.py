@@ -741,6 +741,39 @@ class StudyScreen(Screen):
         self.show_card_side = True  # Current side being shown
         self.card_indices = []  # Store indices of cards being studied
 
+    def on_touch_down(self, touch):
+        # Allow buttons and other controls to handle touch first
+        if super().on_touch_down(touch):
+            return True
+
+        # Check if touch is within card_display bounds
+        if self.card_display and self.card_display.collide_point(*touch.pos):
+            # Calculate relative position
+            width = self.card_display.width
+            if width <= 0:
+                return False
+                
+            relative_x = touch.x - self.card_display.x
+            pct = relative_x / width
+
+            # Define zones:
+            # Left 30%: Don't Know
+            # Middle 40%: Flip
+            # Right 30%: Know
+            if pct < 0.3:
+                # Left side - Don't Know
+                self.mark_card('dont_know')
+            elif pct > 0.7:
+                # Right side - Know
+                self.mark_card('know')
+            else:
+                # Middle - Flip
+                self.flip_card()
+
+            return True
+
+        return False
+
     def edit_current_card(self):
         if not self.card_indices or self.current_index >= len(self.card_indices):
             return
