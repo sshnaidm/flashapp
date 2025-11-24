@@ -17,10 +17,7 @@ version = 1.0
 # python-for-android can build it from source, causing architecture mismatch errors.
 # The SDL2 bootstrap automatically includes Kivy and builds it correctly for ARM.
 # See: ANDROID_FIX_SUMMARY.md and ARCHITECTURE_FIX.md for details
-requirements = python3,\
-    docutils,\
-    pygments,\
-    pillow
+requirements = python3,kivy,docutils,pygments,pillow
 
 # Android specific
 # READ_EXTERNAL_STORAGE: Required for file import functionality
