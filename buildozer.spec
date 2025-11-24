@@ -11,6 +11,9 @@ source.include_exts = py,png,jpg,kv,atlas,json
 
 version = 1.0
 
+# (str) Supported orientation (one of landscape, sensorLandscape, portrait or all)
+orientation = landscape, portrait, portrait-reverse, landscape-reverse
+
 # Remove 'android' from requirements as it's not a Python package
 # IMPORTANT: DO NOT list 'kivy' in requirements!
 # When kivy is listed here, pip installs x86_64 wheels from PyPI BEFORE
