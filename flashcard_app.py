@@ -391,8 +391,13 @@ class ImportCardsScreen(Screen):
         self.data_manager = App.get_running_app().data_manager
 
     def on_enter(self):
-        # Set default path to user's home directory
-        self.file_chooser.path = os.path.expanduser("~")
+        # Set default path based on platform
+        if platform == "android":
+            # On Android, start at external storage root (usually /storage/emulated/0)
+            self.file_chooser.path = "/storage/emulated/0"
+        else:
+            # On desktop, start at user's home directory
+            self.file_chooser.path = os.path.expanduser("~")
 
     def import_cards(self, file_path, separator, create_new_deck, deck_name):
         if not file_path:
