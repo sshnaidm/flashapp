@@ -51,6 +51,12 @@ else
     USER_ARGS="--user $(id -u):$(id -g)"
 fi
 
+# upgrade version
+CURRENT=$(grep "android.numeric_version" buildozer.spec | grep -o '[0-9]*')
+NEW=$((CURRENT + 1))
+sed -i "s/android.numeric_version = $CURRENT/android.numeric_version = $NEW/" buildozer.spec
+echo "Version code updated: $CURRENT → $NEW"
+
 # Run buildozer inside container
 echo "Running buildozer inside container..."
 $CONTAINER_RUNTIME run --name $CONTAINER_NAME \
@@ -89,11 +95,6 @@ $CONTAINER_RUNTIME run --name $CONTAINER_NAME \
 
 # Check if APK was created
 if [ -d "bin" ] && ls bin/*.apk 1> /dev/null 2>&1; then
-    echo ""
-    echo "================================"
-    echo "Build successful!"
-    echo "APK location:"
-    ls -lh bin/*.apk
     echo "================================"
     echo ""
     echo "Cache information:"
@@ -101,6 +102,11 @@ if [ -d "bin" ] && ls bin/*.apk 1> /dev/null 2>&1; then
     echo "  Gradle cache size: $(du -sh $GRADLE_CACHE_DIR 2>/dev/null | cut -f1)"
     echo ""
     echo "Next builds will be faster thanks to cached dependencies!"
+    echo ""
+    echo "================================"
+    echo "Version $NEW build successful!"
+    echo "APK location:"
+    ls -lh bin/*.apk
 else
     echo ""
     echo "Build failed or APK not found"

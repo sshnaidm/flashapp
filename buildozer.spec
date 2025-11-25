@@ -62,8 +62,9 @@ android.archs = arm64-v8a, armeabi-v7a
 # Target API 35 (Android 15) - REQUIRED for Play Store as of August 31, 2025
 
 # (int) overrides automatic versionCode computation (used in build.gradle)
-# this is not the same as app version and should only be edited if you know what you're doing
-# android.numeric_version = 1
+# This must be incremented with each new build for upgrades to work
+# Current: 1 (increment to 2, 3, 4... for each new build)
+android.numeric_version = 1
 
 [buildozer]
 # (int) Log level (0 = error only, 1 = info, 2 = debug (with command output))
