@@ -1441,6 +1441,8 @@ kv_content = f"""
             FileChooserListView:
                 id: file_chooser
                 size_hint_y: 1
+                dirselect: False
+                filters: ['*.txt', '*.json', '*']
 
         BoxLayout:
             orientation: 'vertical'
