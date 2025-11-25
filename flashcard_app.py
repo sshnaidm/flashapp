@@ -12,6 +12,7 @@ from kivy.properties import ObjectProperty, StringProperty
 from kivy.uix.checkbox import CheckBox  # noqa: F401 - Used in kv file
 import json
 import os
+import re
 from kivy.utils import platform
 
 # Data models
@@ -97,6 +98,7 @@ class DataManager:
             # Use app-specific storage (works with scoped storage on Android 11+)
             # This doesn't require any storage permissions
             from kivy.app import App
+
             data_dir = App.get_running_app().user_data_dir
         else:
             data_dir = os.path.expanduser("~/.flashcardapp")
@@ -108,20 +110,31 @@ class DataManager:
         try:
             with open(self.get_data_path(), "r") as f:
                 data = json.load(f)
-                self.folders = []
-                for folder_data in data:
-                    self.folders.append(Folder.from_dict(folder_data))
+                # Check if data is a dict (new format with settings) or list (old format)
+                if isinstance(data, dict):
+                    self.folders = []
+                    for folder_data in data.get("folders", []):
+                        self.folders.append(Folder.from_dict(folder_data))
+                    self.card_font_size = data.get("card_font_size", 28)
+                else:
+                    # Old format: data is just a list of folders
+                    self.folders = []
+                    for folder_data in data:
+                        self.folders.append(Folder.from_dict(folder_data))
+                    self.card_font_size = 28
         except (FileNotFoundError, json.JSONDecodeError):
             # Create a default folder and deck if no data exists
             default_folder = Folder("Default Folder")
             default_deck = Deck("Default Deck")
             default_folder.add_deck(default_deck)
             self.folders = [default_folder]
+            self.card_font_size = 28
             self.save_data()
 
     def save_data(self):
         with open(self.get_data_path(), "w") as f:
-            json.dump([folder.to_dict() for folder in self.folders], f, indent=2)
+            data = {"folders": [folder.to_dict() for folder in self.folders], "card_font_size": self.card_font_size}
+            json.dump(data, f, indent=2)
 
     def add_folder(self, folder_name):
         folder = Folder(folder_name)
@@ -177,6 +190,86 @@ class DataManager:
             deck_index = self.add_deck(folder_index, deck_name)
             if deck_index >= 0:
                 return self.import_cards_from_file(folder_index, deck_index, file_path, separator)
+        return -1
+
+    def export_deck_to_json(self, folder_index, deck_index, filename):
+        """Export a deck to a JSON file."""
+        if 0 <= folder_index < len(self.folders) and 0 <= deck_index < len(self.folders[folder_index].decks):
+            deck = self.folders[folder_index].decks[deck_index]
+            data = deck.to_dict()
+
+            # Determine export path
+            if platform == "android":
+                # Save to Downloads folder on Android
+                export_dir = "/storage/emulated/0/Download"
+            else:
+                export_dir = os.path.join(os.path.expanduser("~"), "Documents", "FlashcardsExports")
+
+            os.makedirs(export_dir, exist_ok=True)
+
+            if not filename.endswith(".json"):
+                filename += ".json"
+
+            file_path = os.path.join(export_dir, filename)
+
+            try:
+                with open(file_path, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=2, ensure_ascii=False)
+                return file_path
+            except Exception as e:
+                print(f"Export error: {str(e)}")
+                return None
+        return None
+
+    def import_deck_from_json(self, folder_index, file_path, as_new_deck=True, deck_name=None):
+        """Import a deck from a JSON file."""
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            # Validate JSON structure
+            if "cards" not in data:
+                return -1
+
+            if as_new_deck:
+                # Use provided name or name from JSON
+                name = deck_name if deck_name else data.get("name", "Imported Deck")
+                deck = Deck(name)
+                for card_data in data["cards"]:
+                    deck.add_card(Card.from_dict(card_data))
+
+                if 0 <= folder_index < len(self.folders):
+                    self.folders[folder_index].add_deck(deck)
+                    self.save_data()
+                    return len(deck.cards)
+            else:
+                # Import into current deck (which implies we need deck_index or get current)
+                # But this method signature takes folder_index.
+                # For simplicity, if not as_new_deck, we assume the caller handles merging or we need deck_index.
+                # Let's adjust the signature or logic.
+                pass
+            return -1
+        except Exception as e:
+            print(f"Import JSON error: {str(e)}")
+            return -1
+
+    def import_json_to_deck(self, folder_index, deck_index, file_path):
+        """Import cards from JSON into an existing deck."""
+        if 0 <= folder_index < len(self.folders) and 0 <= deck_index < len(self.folders[folder_index].decks):
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+
+                if "cards" in data:
+                    deck = self.folders[folder_index].decks[deck_index]
+                    count = 0
+                    for card_data in data["cards"]:
+                        deck.add_card(Card.from_dict(card_data))
+                        count += 1
+                    self.save_data()
+                    return count
+            except Exception as e:
+                print(f"Import JSON to deck error: {str(e)}")
         return -1
 
     def set_current_folder_deck(self, folder_index, deck_index):
@@ -257,6 +350,56 @@ class HomeScreen(Screen):
         btn_layout.add_widget(btn_cancel)
         btn_layout.add_widget(btn_submit)
         content.add_widget(txt_input)
+        content.add_widget(btn_layout)
+
+        popup.open()
+
+    def open_settings(self):
+        content = BoxLayout(orientation="vertical", padding=10, spacing=10)
+
+        # Font size setting
+        font_size_layout = BoxLayout(orientation="horizontal", size_hint_y=None, height=50, spacing=10)
+        font_size_layout.add_widget(Label(text="Card Font Size:", size_hint_x=0.5))
+
+        font_size_input = TextInput(
+            text=str(self.data_manager.card_font_size), multiline=False, input_filter="int", size_hint_x=0.3
+        )
+        font_size_layout.add_widget(font_size_input)
+        font_size_layout.add_widget(Label(text="sp", size_hint_x=0.2))
+
+        content.add_widget(Label(text="Settings", size_hint_y=None, height=30))
+        content.add_widget(font_size_layout)
+
+        # Buttons
+        btn_layout = BoxLayout(size_hint_y=None, height=50, spacing=5)
+
+        popup = Popup(title="Settings", content=content, size_hint=(0.8, 0.4))
+
+        def on_save(instance):
+            try:
+                new_size = int(font_size_input.text)
+                if 12 <= new_size <= 72:  # Reasonable limits
+                    self.data_manager.card_font_size = new_size
+                    self.data_manager.save_data()
+                    popup.dismiss()
+                else:
+                    error_popup = Popup(
+                        title="Error", content=Label(text="Font size must be between 12 and 72"), size_hint=(0.7, 0.3)
+                    )
+                    error_popup.open()
+            except ValueError:
+                error_popup = Popup(
+                    title="Error", content=Label(text="Please enter a valid number"), size_hint=(0.7, 0.3)
+                )
+                error_popup.open()
+
+        btn_cancel = Button(text="Cancel")
+        btn_cancel.bind(on_release=popup.dismiss)
+        btn_save = Button(text="Save")
+        btn_save.bind(on_release=on_save)
+
+        btn_layout.add_widget(btn_cancel)
+        btn_layout.add_widget(btn_save)
         content.add_widget(btn_layout)
 
         popup.open()
@@ -404,19 +547,31 @@ class ImportCardsScreen(Screen):
             self.show_error("Please select a file.")
             return
 
-        if create_new_deck and not deck_name.strip():
+        selected_file = file_path[0]
+        is_json = selected_file.lower().endswith(".json")
+
+        if create_new_deck and not deck_name.strip() and not is_json:
             self.show_error("Please enter a deck name.")
             return
 
         try:
-            if create_new_deck:
-                imported = self.data_manager.import_cards_as_new_deck(
-                    self.folder_index, deck_name.strip(), file_path[0], separator
-                )
+            imported = 0
+            if is_json:
+                if create_new_deck:
+                    imported = self.data_manager.import_deck_from_json(
+                        self.folder_index, selected_file, as_new_deck=True, deck_name=deck_name.strip()
+                    )
+                else:
+                    imported = self.data_manager.import_json_to_deck(self.folder_index, self.deck_index, selected_file)
             else:
-                imported = self.data_manager.import_cards_from_file(
-                    self.folder_index, self.deck_index, file_path[0], separator
-                )
+                if create_new_deck:
+                    imported = self.data_manager.import_cards_as_new_deck(
+                        self.folder_index, deck_name.strip(), selected_file, separator
+                    )
+                else:
+                    imported = self.data_manager.import_cards_from_file(
+                        self.folder_index, self.deck_index, selected_file, separator
+                    )
 
             if imported > 0:
                 self.show_success(f"Successfully imported {imported} cards.")
@@ -726,6 +881,44 @@ class DeckScreen(Screen):
         self.data_manager.save_data()
         self.update_card_list()
 
+    def export_deck(self):
+        content = BoxLayout(orientation="vertical", padding=10, spacing=10)
+        # Suggest filename based on deck name, sanitized
+        safe_name = re.sub(r"[^\w\-_\. ]", "_", self.deck_name)
+        txt_input = TextInput(hint_text="Filename", multiline=False, text=safe_name)
+        btn_layout = BoxLayout(size_hint_y=None, height=50, spacing=5)
+
+        popup = Popup(title="Export Deck", content=content, size_hint=(0.8, 0.45))
+
+        def on_submit(instance):
+            if txt_input.text.strip():
+                filename = txt_input.text.strip()
+                path = self.data_manager.export_deck_to_json(self.folder_index, self.deck_index, filename)
+                popup.dismiss()
+
+                if path:
+                    # Show path in a copy-friendly way or just a message
+                    msg = f"Exported to:\n{path}"
+                    success = Popup(title="Success", content=Label(text=msg, halign="center"), size_hint=(0.9, 0.4))
+                    success.open()
+                else:
+                    error = Popup(title="Error", content=Label(text="Export failed."), size_hint=(0.7, 0.3))
+                    error.open()
+
+        btn_cancel = Button(text="Cancel")
+        btn_cancel.bind(on_release=popup.dismiss)
+        btn_submit = Button(text="Export")
+        btn_submit.bind(on_release=on_submit)
+
+        btn_layout.add_widget(btn_cancel)
+        btn_layout.add_widget(btn_submit)
+
+        content.add_widget(Label(text="Enter filename for export (JSON):", size_hint_y=None, height=30))
+        content.add_widget(txt_input)
+        content.add_widget(btn_layout)
+
+        popup.open()
+
 
 class StudyScreen(Screen):
     card_display = ObjectProperty(None)
@@ -752,7 +945,7 @@ class StudyScreen(Screen):
             width = self.card_display.width
             if width <= 0:
                 return False
-                
+
             relative_x = touch.x - self.card_display.x
             pct = relative_x / width
 
@@ -762,10 +955,10 @@ class StudyScreen(Screen):
             # Right 30%: Know
             if pct < 0.3:
                 # Left side - Don't Know
-                self.mark_card('dont_know')
+                self.mark_card("dont_know")
             elif pct > 0.7:
                 # Right side - Know
-                self.mark_card('know')
+                self.mark_card("know")
             else:
                 # Middle - Flip
                 self.flip_card()
@@ -849,6 +1042,9 @@ class StudyScreen(Screen):
             # Update the progress label
             self.progress_label.text = f"Card {self.current_index + 1} of {len(self.card_indices)}"
 
+            # Update font size from settings
+            self.card_display.font_size = f"{self.data_manager.card_font_size}sp"
+
             # If we're in flip_deck mode (show_question_side is False),
             # we show answer first, then question when flipped
             if not self.show_question_side:
@@ -904,6 +1100,18 @@ class StudyScreen(Screen):
         self.show_card_side = not self.show_card_side
         self.update_display()
 
+    def increase_font_size(self):
+        if self.data_manager.card_font_size < 72:
+            self.data_manager.card_font_size += 2
+            self.data_manager.save_data()
+            self.update_display()
+
+    def decrease_font_size(self):
+        if self.data_manager.card_font_size > 12:
+            self.data_manager.card_font_size -= 2
+            self.data_manager.save_data()
+            self.update_display()
+
     def show_summary(self):
         # Count statuses
         deck = self.data_manager.get_current_deck()
@@ -944,6 +1152,7 @@ class FlashcardApp(App):
     def build(self):
         # Load the KV layout before building the UI
         from kivy.lang import Builder
+
         Builder.load_string(kv_content)
 
         # Window.size = (1600, 1400)  # DISABLED: Causes threading/mutex crash on Android
@@ -954,6 +1163,7 @@ class FlashcardApp(App):
         # Request READ_EXTERNAL_STORAGE permission for file import functionality
         if platform == "android":
             from android.permissions import request_permissions, Permission
+
             # Only request READ (not WRITE) - write operations use app-specific storage
             request_permissions([Permission.READ_EXTERNAL_STORAGE])
 
@@ -1012,7 +1222,25 @@ class FlashcardApp(App):
 
 
 # Add kv file content
-kv_content = """
+# Platform-specific button text
+if platform == "android":
+    btn_flip = "Flip Card"
+    btn_go_back = "Go Back"
+    btn_know = "Know"
+    btn_dont_know = "Don't Know"
+    btn_study_dont_know = "Study Don't Know"
+    btn_flip_deck = "Flip Deck"
+    hint_text = "Tap center to flip, left for Don't Know, right for Know"
+else:
+    btn_flip = "Flip Card (Space)"
+    btn_go_back = "Go Back (B)"
+    btn_know = "Know (K)"
+    btn_dont_know = "Don't Know (D)"
+    btn_study_dont_know = "Study Don't Know Cards"
+    btn_flip_deck = "Flip Deck (Answer First)"
+    hint_text = "Shortcuts: Space to flip, K for Know, D for Don't Know, B to go back"
+
+kv_content = f"""
 <HomeScreen>:
     folder_list: folder_list
     BoxLayout:
@@ -1034,11 +1262,19 @@ kv_content = """
                 height: self.minimum_height
                 spacing: 5
 
-        Button:
-            text: 'Add New Folder'
+        BoxLayout:
             size_hint_y: None
             height: '50dp'
-            on_release: root.add_new_folder()
+            spacing: 5
+
+            Button:
+                text: 'Add New Folder'
+                on_release: root.add_new_folder()
+
+            Button:
+                text: 'Settings'
+                size_hint_x: 0.4
+                on_release: root.open_settings()
 
 <FolderScreen>:
     deck_list: deck_list
@@ -1148,6 +1384,10 @@ kv_content = """
                 on_release: root.import_cards()
 
             Button:
+                text: 'Export Deck'
+                on_release: root.export_deck()
+
+            Button:
                 text: 'Bulk Reset'
                 on_release: root.bulk_reset()
 
@@ -1165,11 +1405,11 @@ kv_content = """
                 on_release: root.start_study_session()
 
             Button:
-                text: "Study Don't Know Cards"
+                text: "{btn_study_dont_know}"
                 on_release: root.study_dont_know()
 
             Button:
-                text: 'Flip Deck (Answer First)'
+                text: "{btn_flip_deck}"
                 on_release: root.flip_deck()
 
 <ImportCardsScreen>:
@@ -1260,11 +1500,21 @@ kv_content = """
             Label:
                 id: progress_label
                 text: 'Card 0 of 0'
-                size_hint_x: 0.7
+                size_hint_x: 0.5
+
+            Button:
+                text: 'A-'
+                size_hint_x: 0.15
+                on_release: root.decrease_font_size()
+
+            Button:
+                text: 'A+'
+                size_hint_x: 0.15
+                on_release: root.increase_font_size()
 
             Button:
                 text: 'Exit'
-                size_hint_x: 0.3
+                size_hint_x: 0.2
                 on_release: root.show_summary()
 
         Label:
@@ -1275,6 +1525,7 @@ kv_content = """
             valign: 'middle'
             text_size: self.width, None
             size_hint_y: 0.8
+            font_size: '28sp'
 
         BoxLayout:
             size_hint_y: None
@@ -1282,11 +1533,11 @@ kv_content = """
             spacing: 10
 
             Button:
-                text: 'Flip Card (Space)'
+                text: "{btn_flip}"
                 on_release: root.flip_card()
 
             Button:
-                text: 'Go Back (B)'
+                text: "{btn_go_back}"
                 on_release: root.go_back()
 
         BoxLayout:
@@ -1295,11 +1546,11 @@ kv_content = """
             spacing: 10
 
             Button:
-                text: 'Know (K)'
+                text: "{btn_know}"
                 on_release: root.mark_card('know')
 
             Button:
-                text: "Don't Know (D)"
+                text: "{btn_dont_know}"
                 on_release: root.mark_card('dont_know')
 
         BoxLayout:
@@ -1314,7 +1565,7 @@ kv_content = """
         Label:
             size_hint_y: None
             height: '30dp'
-            text: 'Shortcuts: Space to flip, K for Know, D for Don\\'t Know, B to go back'
+            text: "{hint_text}"
             font_size: '12sp'
 """
 
