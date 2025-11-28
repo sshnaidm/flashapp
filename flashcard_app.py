@@ -8,11 +8,110 @@ from kivy.uix.screenmanager import ScreenManager, Screen
 from kivy.uix.popup import Popup
 from kivy.uix.filechooser import FileChooserListView
 from kivy.core.window import Window
-from kivy.properties import ObjectProperty, StringProperty
+from kivy.properties import ObjectProperty, StringProperty, BooleanProperty
 from kivy.uix.checkbox import CheckBox  # noqa: F401 - Used in kv file
 import json
 import os
+import re
 from kivy.utils import platform
+from kivy.clock import mainthread
+
+# Android Helpers
+if platform == "android":
+    from jnius import autoclass, cast
+    from android import activity
+
+    def android_get_file_from_content_uri(content_uri):
+        """
+        Copies a file from a content URI (content://...) to a local file in the app's private storage.
+        This bypasses issues with direct file access and 'msf:' style IDs on newer Androids.
+        """
+        try:
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            Context = autoclass("android.content.Context")
+            current_activity = cast("android.app.Activity", PythonActivity.mActivity)
+            content_resolver = current_activity.getContentResolver()
+
+            # Open input stream
+            input_stream = content_resolver.openInputStream(content_uri)
+            if not input_stream:
+                return None
+
+            # Try to get the filename
+            file_name = "imported_file"
+            cursor = content_resolver.query(content_uri, None, None, None, None)
+            if cursor:
+                if cursor.moveToFirst():
+                    idx = cursor.getColumnIndex("_display_name")
+                    if idx != -1:
+                        file_name = cursor.getString(idx)
+                cursor.close()
+
+            # Ensure safe filename
+            file_name = os.path.basename(file_name)
+
+            # Define destination path in app's private storage
+            app_root = App.get_running_app().user_data_dir
+            dest_path = os.path.join(app_root, file_name)
+
+            # Copy data
+            output_stream = open(dest_path, "wb")
+            buffer_size = 4096
+            buffer = bytearray(buffer_size)
+
+            while True:
+                bytes_read = input_stream.read(buffer)
+                if bytes_read == -1:
+                    break
+                output_stream.write(buffer[:bytes_read])
+
+            output_stream.close()
+            input_stream.close()
+
+            return dest_path
+        except Exception as e:
+            print(f"Error resolving Android URI: {e}")
+            return None
+
+    class AndroidFilePicker:
+        """
+        Custom file picker to replace plyer which crashes on some Samsung/Android 11+ devices
+        due to NumberFormatException in URI parsing.
+        """
+
+        def __init__(self, callback):
+            self.callback = callback
+            self.RESULT_CODE = 12345
+            activity.bind(on_activity_result=self.on_activity_result)
+
+        def open_picker(self):
+            Intent = autoclass("android.content.Intent")
+            intent = Intent(Intent.ACTION_GET_CONTENT)
+            intent.setType("*/*")
+            intent.addCategory(Intent.CATEGORY_OPENABLE)
+
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            current_activity = cast("android.app.Activity", PythonActivity.mActivity)
+            current_activity.startActivityForResult(intent, self.RESULT_CODE)
+
+        def on_activity_result(self, request_code, result_code, intent):
+            if request_code == self.RESULT_CODE:
+                activity.unbind(on_activity_result=self.on_activity_result)
+                if result_code == -1:  # Activity.RESULT_OK
+                    uri = intent.getData()
+                    if uri:
+                        file_path = android_get_file_from_content_uri(uri)
+                        if file_path:
+                            self.callback([file_path])
+                        else:
+                            self.callback([])  # Failed to resolve
+                    else:
+                        self.callback([])
+                else:
+                    self.callback([])  # Cancelled
+                return True
+            return False
+
 
 # Data models
 
@@ -94,10 +193,11 @@ class DataManager:
 
     def get_data_path(self):
         if platform == "android":
-            from android.storage import primary_external_storage_path
+            # Use app-specific storage (works with scoped storage on Android 11+)
+            # This doesn't require any storage permissions
+            from kivy.app import App
 
-            storage_path = primary_external_storage_path()
-            data_dir = os.path.join(storage_path, "flashcardapp")
+            data_dir = App.get_running_app().user_data_dir
         else:
             data_dir = os.path.expanduser("~/.flashcardapp")
 
@@ -108,20 +208,31 @@ class DataManager:
         try:
             with open(self.get_data_path(), "r") as f:
                 data = json.load(f)
-                self.folders = []
-                for folder_data in data:
-                    self.folders.append(Folder.from_dict(folder_data))
+                # Check if data is a dict (new format with settings) or list (old format)
+                if isinstance(data, dict):
+                    self.folders = []
+                    for folder_data in data.get("folders", []):
+                        self.folders.append(Folder.from_dict(folder_data))
+                    self.card_font_size = data.get("card_font_size", 28)
+                else:
+                    # Old format: data is just a list of folders
+                    self.folders = []
+                    for folder_data in data:
+                        self.folders.append(Folder.from_dict(folder_data))
+                    self.card_font_size = 28
         except (FileNotFoundError, json.JSONDecodeError):
             # Create a default folder and deck if no data exists
             default_folder = Folder("Default Folder")
             default_deck = Deck("Default Deck")
             default_folder.add_deck(default_deck)
             self.folders = [default_folder]
+            self.card_font_size = 28
             self.save_data()
 
     def save_data(self):
         with open(self.get_data_path(), "w") as f:
-            json.dump([folder.to_dict() for folder in self.folders], f, indent=2)
+            data = {"folders": [folder.to_dict() for folder in self.folders], "card_font_size": self.card_font_size}
+            json.dump(data, f, indent=2)
 
     def add_folder(self, folder_name):
         folder = Folder(folder_name)
@@ -177,6 +288,86 @@ class DataManager:
             deck_index = self.add_deck(folder_index, deck_name)
             if deck_index >= 0:
                 return self.import_cards_from_file(folder_index, deck_index, file_path, separator)
+        return -1
+
+    def export_deck_to_json(self, folder_index, deck_index, filename):
+        """Export a deck to a JSON file."""
+        if 0 <= folder_index < len(self.folders) and 0 <= deck_index < len(self.folders[folder_index].decks):
+            deck = self.folders[folder_index].decks[deck_index]
+            data = deck.to_dict()
+
+            # Determine export path
+            if platform == "android":
+                # Save to Downloads folder on Android
+                export_dir = "/storage/emulated/0/Download"
+            else:
+                export_dir = os.path.join(os.path.expanduser("~"), "Documents", "FlashcardsExports")
+
+            os.makedirs(export_dir, exist_ok=True)
+
+            if not filename.endswith(".json"):
+                filename += ".json"
+
+            file_path = os.path.join(export_dir, filename)
+
+            try:
+                with open(file_path, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=2, ensure_ascii=False)
+                return file_path
+            except Exception as e:
+                print(f"Export error: {str(e)}")
+                return None
+        return None
+
+    def import_deck_from_json(self, folder_index, file_path, as_new_deck=True, deck_name=None):
+        """Import a deck from a JSON file."""
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            # Validate JSON structure
+            if "cards" not in data:
+                return -1
+
+            if as_new_deck:
+                # Use provided name or name from JSON
+                name = deck_name if deck_name else data.get("name", "Imported Deck")
+                deck = Deck(name)
+                for card_data in data["cards"]:
+                    deck.add_card(Card.from_dict(card_data))
+
+                if 0 <= folder_index < len(self.folders):
+                    self.folders[folder_index].add_deck(deck)
+                    self.save_data()
+                    return len(deck.cards)
+            else:
+                # Import into current deck (which implies we need deck_index or get current)
+                # But this method signature takes folder_index.
+                # For simplicity, if not as_new_deck, we assume the caller handles merging or we need deck_index.
+                # Let's adjust the signature or logic.
+                pass
+            return -1
+        except Exception as e:
+            print(f"Import JSON error: {str(e)}")
+            return -1
+
+    def import_json_to_deck(self, folder_index, deck_index, file_path):
+        """Import cards from JSON into an existing deck."""
+        if 0 <= folder_index < len(self.folders) and 0 <= deck_index < len(self.folders[folder_index].decks):
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+
+                if "cards" in data:
+                    deck = self.folders[folder_index].decks[deck_index]
+                    count = 0
+                    for card_data in data["cards"]:
+                        deck.add_card(Card.from_dict(card_data))
+                        count += 1
+                    self.save_data()
+                    return count
+            except Exception as e:
+                print(f"Import JSON to deck error: {str(e)}")
         return -1
 
     def set_current_folder_deck(self, folder_index, deck_index):
@@ -261,6 +452,56 @@ class HomeScreen(Screen):
 
         popup.open()
 
+    def open_settings(self):
+        content = BoxLayout(orientation="vertical", padding=10, spacing=10)
+
+        # Font size setting
+        font_size_layout = BoxLayout(orientation="horizontal", size_hint_y=None, height=50, spacing=10)
+        font_size_layout.add_widget(Label(text="Card Font Size:", size_hint_x=0.5))
+
+        font_size_input = TextInput(
+            text=str(self.data_manager.card_font_size), multiline=False, input_filter="int", size_hint_x=0.3
+        )
+        font_size_layout.add_widget(font_size_input)
+        font_size_layout.add_widget(Label(text="sp", size_hint_x=0.2))
+
+        content.add_widget(Label(text="Settings", size_hint_y=None, height=30))
+        content.add_widget(font_size_layout)
+
+        # Buttons
+        btn_layout = BoxLayout(size_hint_y=None, height=50, spacing=5)
+
+        popup = Popup(title="Settings", content=content, size_hint=(0.8, 0.4))
+
+        def on_save(instance):
+            try:
+                new_size = int(font_size_input.text)
+                if 12 <= new_size <= 72:  # Reasonable limits
+                    self.data_manager.card_font_size = new_size
+                    self.data_manager.save_data()
+                    popup.dismiss()
+                else:
+                    error_popup = Popup(
+                        title="Error", content=Label(text="Font size must be between 12 and 72"), size_hint=(0.7, 0.3)
+                    )
+                    error_popup.open()
+            except ValueError:
+                error_popup = Popup(
+                    title="Error", content=Label(text="Please enter a valid number"), size_hint=(0.7, 0.3)
+                )
+                error_popup.open()
+
+        btn_cancel = Button(text="Cancel")
+        btn_cancel.bind(on_release=popup.dismiss)
+        btn_save = Button(text="Save")
+        btn_save.bind(on_release=on_save)
+
+        btn_layout.add_widget(btn_cancel)
+        btn_layout.add_widget(btn_save)
+        content.add_widget(btn_layout)
+
+        popup.open()
+
 
 class FolderScreen(Screen):
     deck_list = ObjectProperty(None)
@@ -325,13 +566,85 @@ class FolderScreen(Screen):
         content = BoxLayout(orientation="vertical", padding=10, spacing=10)
         txt_input = TextInput(hint_text="New Deck Name", multiline=False)
         sep_input = TextInput(hint_text="Separator (default: ;)", multiline=False, text=";")
-        file_chooser = FileChooserListView(path=os.path.expanduser("~"))
+        sep_label = Label(text="Enter separator character:", size_hint_y=None, height="30dp")
 
-        content.add_widget(Label(text="Select a text file to import:"))
-        content.add_widget(file_chooser)
-        content.add_widget(Label(text="Enter separator character:"))
+        # Container to hold selected file path (list to allow modification in closure)
+        selected_file_holder = [None]
+        file_chooser = None  # Will be used only on desktop
+
+        def update_ui_for_file(filepath):
+            if not filepath:
+                return
+            is_json = filepath.lower().endswith(".json")
+
+            # Show/hide separator inputs based on file type
+            if is_json:
+                sep_label.height = 0
+                sep_label.opacity = 0
+                sep_input.height = 0
+                sep_input.opacity = 0
+                sep_input.disabled = True
+            else:
+                sep_label.height = 30  # 30dp
+                sep_label.opacity = 1
+                sep_input.height = 40  # 40dp (default TextInput height)
+                sep_input.opacity = 1
+                sep_input.disabled = False
+
+        if platform == "android":
+            # Android: Use native file picker
+            file_label = Label(text="No file selected", size_hint_y=None, height="40dp")
+
+            def on_android_selection(selection):
+                if selection:
+                    selected_file_holder[0] = selection[0]
+
+                    # Update UI on main thread
+                    @mainthread
+                    def update_label():
+                        try:
+                            filepath = selection[0]
+                            file_label.text = f"Selected: {os.path.basename(filepath)}"
+                            update_ui_for_file(filepath)
+                        except Exception:
+                            file_label.text = "File selected"
+
+                    update_label()
+
+            def open_picker(instance):
+                try:
+                    # Use custom AndroidFilePicker instead of plyer
+                    # We define the picker instance here
+                    picker = AndroidFilePicker(on_android_selection)
+                    picker.open_picker()
+                    # Keep reference to prevent GC until callback
+                    instance.picker_ref = picker
+                except Exception as e:
+                    file_label.text = "Error opening file picker"
+                    print(f"Error: {e}")
+
+            btn_select = Button(text="Select File", size_hint_y=None, height="50dp")
+            btn_select.bind(on_release=open_picker)
+
+            content.add_widget(Label(text="Select a text/JSON file:", size_hint_y=None, height="30dp"))
+            content.add_widget(btn_select)
+            content.add_widget(file_label)
+        else:
+            # Desktop: Use FileChooserListView
+            file_chooser = FileChooserListView(path=os.path.expanduser("~"), filters=["*.txt", "*.json", "*"])
+            content.add_widget(Label(text="Select a text file to import:"))
+            content.add_widget(file_chooser)
+
+            # Bind desktop selection
+            def on_desktop_selection(instance, selection):
+                if selection:
+                    update_ui_for_file(selection[0])
+
+            file_chooser.bind(selection=on_desktop_selection)
+
+        content.add_widget(sep_label)
         content.add_widget(sep_input)
-        content.add_widget(Label(text="Enter deck name:"))
+        content.add_widget(Label(text="Enter deck name:", size_hint_y=None, height="30dp"))
         content.add_widget(txt_input)
 
         btn_layout = BoxLayout(size_hint_y=None, height=50, spacing=5)
@@ -339,7 +652,13 @@ class FolderScreen(Screen):
         popup = Popup(title="Import Cards to New Deck", content=content, size_hint=(0.9, 0.9))
 
         def on_submit(instance):
-            if not file_chooser.selection:
+            file_path = None
+            if platform == "android":
+                file_path = selected_file_holder[0]
+            elif file_chooser and file_chooser.selection:
+                file_path = file_chooser.selection[0]
+
+            if not file_path:
                 return
 
             if not txt_input.text.strip():
@@ -348,7 +667,7 @@ class FolderScreen(Screen):
             separator = sep_input.text.strip() or ";"
 
             imported = self.data_manager.import_cards_as_new_deck(
-                self.folder_index, txt_input.text.strip(), file_chooser.selection[0], separator
+                self.folder_index, txt_input.text.strip(), file_path, separator
             )
 
             if imported > 0:
@@ -385,33 +704,106 @@ class ImportCardsScreen(Screen):
     file_chooser = ObjectProperty(None)
     folder_index = -1
     deck_index = -1
+    is_android = BooleanProperty(platform == "android")
+    is_json_selected = BooleanProperty(False)
 
     def __init__(self, **kwargs):
         super(ImportCardsScreen, self).__init__(**kwargs)
         self.data_manager = App.get_running_app().data_manager
+        self.selected_file_path = None
 
     def on_enter(self):
-        # Set default path to user's home directory
-        self.file_chooser.path = os.path.expanduser("~")
+        # Reset selection
+        self.selected_file_path = None
+        self.is_json_selected = False
 
-    def import_cards(self, file_path, separator, create_new_deck, deck_name):
-        if not file_path:
-            self.show_error("Please select a file.")
+        # Set default path based on platform
+        if not self.is_android:
+            # On desktop, start at user's home directory
+            if self.file_chooser:
+                self.file_chooser.path = os.path.expanduser("~")
+        else:
+            # On Android, update UI to show file selection status
+            if hasattr(self, "ids") and "selected_file_label" in self.ids:
+                self.ids.selected_file_label.text = "No file selected - Tap 'Select File' button"
+
+    def on_desktop_selection(self, selection):
+        """Handle desktop file selection change"""
+        if selection:
+            self.is_json_selected = selection[0].lower().endswith(".json")
+        else:
+            self.is_json_selected = False
+
+    def open_file_picker_android(self):
+        """Open native Android file picker"""
+        try:
+            # Use custom AndroidFilePicker instead of plyer
+            self.android_picker = AndroidFilePicker(self.handle_android_selection)
+            self.android_picker.open_picker()
+        except Exception as e:
+            self.show_error(f"Error opening file picker: {str(e)}")
+
+    @mainthread
+    def handle_android_selection(self, selection):
+        """Handle file selection from Android native picker"""
+        if not selection:
+            # Debugging: let user know if we got an empty selection
+            self.show_error("File picker returned no selection. Try picking a file from internal storage.")
             return
 
-        if create_new_deck and not deck_name.strip():
+        if selection:
+            # plyer returns a list of paths
+            self.selected_file_path = selection[0]
+
+            # Check if it is a JSON file
+            self.is_json_selected = self.selected_file_path.lower().endswith(".json")
+
+            # Update the label to show selected file
+            try:
+                filename = os.path.basename(self.selected_file_path)
+                if hasattr(self, "ids") and "selected_file_label" in self.ids:
+                    self.ids.selected_file_label.text = f"Selected: {filename}"
+            except Exception as e:
+                self.show_error(f"Error processing file selection: {str(e)}")
+
+    def import_cards(self, file_path, separator, create_new_deck, deck_name):
+        # On Android, use the selected file from native picker
+        if platform == "android":
+            if not self.selected_file_path:
+                self.show_error("Please select a file first.")
+                return
+            selected_file = self.selected_file_path
+        else:
+            # On desktop, use file_chooser selection
+            if not file_path:
+                self.show_error("Please select a file.")
+                return
+            selected_file = file_path[0]
+
+        is_json = selected_file.lower().endswith(".json")
+
+        if create_new_deck and not deck_name.strip() and not is_json:
             self.show_error("Please enter a deck name.")
             return
 
         try:
-            if create_new_deck:
-                imported = self.data_manager.import_cards_as_new_deck(
-                    self.folder_index, deck_name.strip(), file_path[0], separator
-                )
+            imported = 0
+            if is_json:
+                if create_new_deck:
+                    imported = self.data_manager.import_deck_from_json(
+                        self.folder_index, selected_file, as_new_deck=True, deck_name=deck_name.strip()
+                    )
+                else:
+                    imported = self.data_manager.import_json_to_deck(self.folder_index, self.deck_index, selected_file)
             else:
-                imported = self.data_manager.import_cards_from_file(
-                    self.folder_index, self.deck_index, file_path[0], separator
-                )
+                if create_new_deck:
+                    imported = self.data_manager.import_cards_as_new_deck(
+                        self.folder_index, deck_name.strip(), selected_file, separator
+                    )
+                else:
+                    imported = self.data_manager.import_cards_from_file(
+                        self.folder_index, self.deck_index, selected_file, separator
+                    )
 
             if imported > 0:
                 self.show_success(f"Successfully imported {imported} cards.")
@@ -721,6 +1113,44 @@ class DeckScreen(Screen):
         self.data_manager.save_data()
         self.update_card_list()
 
+    def export_deck(self):
+        content = BoxLayout(orientation="vertical", padding=10, spacing=10)
+        # Suggest filename based on deck name, sanitized
+        safe_name = re.sub(r"[^\w\-_\. ]", "_", self.deck_name)
+        txt_input = TextInput(hint_text="Filename", multiline=False, text=safe_name)
+        btn_layout = BoxLayout(size_hint_y=None, height=50, spacing=5)
+
+        popup = Popup(title="Export Deck", content=content, size_hint=(0.8, 0.45))
+
+        def on_submit(instance):
+            if txt_input.text.strip():
+                filename = txt_input.text.strip()
+                path = self.data_manager.export_deck_to_json(self.folder_index, self.deck_index, filename)
+                popup.dismiss()
+
+                if path:
+                    # Show path in a copy-friendly way or just a message
+                    msg = f"Exported to:\n{path}"
+                    success = Popup(title="Success", content=Label(text=msg, halign="center"), size_hint=(0.9, 0.4))
+                    success.open()
+                else:
+                    error = Popup(title="Error", content=Label(text="Export failed."), size_hint=(0.7, 0.3))
+                    error.open()
+
+        btn_cancel = Button(text="Cancel")
+        btn_cancel.bind(on_release=popup.dismiss)
+        btn_submit = Button(text="Export")
+        btn_submit.bind(on_release=on_submit)
+
+        btn_layout.add_widget(btn_cancel)
+        btn_layout.add_widget(btn_submit)
+
+        content.add_widget(Label(text="Enter filename for export (JSON):", size_hint_y=None, height=30))
+        content.add_widget(txt_input)
+        content.add_widget(btn_layout)
+
+        popup.open()
+
 
 class StudyScreen(Screen):
     card_display = ObjectProperty(None)
@@ -735,6 +1165,39 @@ class StudyScreen(Screen):
         self.show_question_side = True  # Default side to start with
         self.show_card_side = True  # Current side being shown
         self.card_indices = []  # Store indices of cards being studied
+
+    def on_touch_down(self, touch):
+        # Allow buttons and other controls to handle touch first
+        if super().on_touch_down(touch):
+            return True
+
+        # Check if touch is within card_display bounds
+        if self.card_display and self.card_display.collide_point(*touch.pos):
+            # Calculate relative position
+            width = self.card_display.width
+            if width <= 0:
+                return False
+
+            relative_x = touch.x - self.card_display.x
+            pct = relative_x / width
+
+            # Define zones:
+            # Left 30%: Don't Know
+            # Middle 40%: Flip
+            # Right 30%: Know
+            if pct < 0.3:
+                # Left side - Don't Know
+                self.mark_card("dont_know")
+            elif pct > 0.7:
+                # Right side - Know
+                self.mark_card("know")
+            else:
+                # Middle - Flip
+                self.flip_card()
+
+            return True
+
+        return False
 
     def edit_current_card(self):
         if not self.card_indices or self.current_index >= len(self.card_indices):
@@ -811,6 +1274,9 @@ class StudyScreen(Screen):
             # Update the progress label
             self.progress_label.text = f"Card {self.current_index + 1} of {len(self.card_indices)}"
 
+            # Update font size from settings
+            self.card_display.font_size = f"{self.data_manager.card_font_size}sp"
+
             # If we're in flip_deck mode (show_question_side is False),
             # we show answer first, then question when flipped
             if not self.show_question_side:
@@ -866,6 +1332,18 @@ class StudyScreen(Screen):
         self.show_card_side = not self.show_card_side
         self.update_display()
 
+    def increase_font_size(self):
+        if self.data_manager.card_font_size < 72:
+            self.data_manager.card_font_size += 2
+            self.data_manager.save_data()
+            self.update_display()
+
+    def decrease_font_size(self):
+        if self.data_manager.card_font_size > 12:
+            self.data_manager.card_font_size -= 2
+            self.data_manager.save_data()
+            self.update_display()
+
     def show_summary(self):
         # Count statuses
         deck = self.data_manager.get_current_deck()
@@ -904,13 +1382,22 @@ class StudyScreen(Screen):
 # App Layout
 class FlashcardApp(App):
     def build(self):
-        Window.size = (1600, 1400)  # Add this line to set window size
+        # Load the KV layout before building the UI
+        from kivy.lang import Builder
 
-        # Request Android permissions if needed
+        Builder.load_string(kv_content)
+
+        # Window.size = (1600, 1400)  # DISABLED: Causes threading/mutex crash on Android
+        # Fixed window size only works on desktop, on Android it causes rendering issues
+        if platform != "android":
+            Window.size = (1600, 1400)  # Only set window size on desktop
+
+        # Request READ_EXTERNAL_STORAGE permission for file import functionality
         if platform == "android":
             from android.permissions import request_permissions, Permission
 
-            request_permissions([Permission.READ_EXTERNAL_STORAGE, Permission.WRITE_EXTERNAL_STORAGE])
+            # Only request READ (not WRITE) - write operations use app-specific storage
+            request_permissions([Permission.READ_EXTERNAL_STORAGE])
 
         # Initialize data manager
         self.data_manager = DataManager()
@@ -967,7 +1454,25 @@ class FlashcardApp(App):
 
 
 # Add kv file content
-kv_content = """
+# Platform-specific button text
+if platform == "android":
+    btn_flip = "Flip Card"
+    btn_go_back = "Go Back"
+    btn_know = "Know"
+    btn_dont_know = "Don't Know"
+    btn_study_dont_know = "Study Don't Know"
+    btn_flip_deck = "Flip Deck"
+    hint_text = "Tap center to flip, left for Don't Know, right for Know"
+else:
+    btn_flip = "Flip Card (Space)"
+    btn_go_back = "Go Back (B)"
+    btn_know = "Know (K)"
+    btn_dont_know = "Don't Know (D)"
+    btn_study_dont_know = "Study Don't Know Cards"
+    btn_flip_deck = "Flip Deck (Answer First)"
+    hint_text = "Shortcuts: Space to flip, K for Know, D for Don't Know, B to go back"
+
+kv_content = f"""
 <HomeScreen>:
     folder_list: folder_list
     BoxLayout:
@@ -989,11 +1494,19 @@ kv_content = """
                 height: self.minimum_height
                 spacing: 5
 
-        Button:
-            text: 'Add New Folder'
+        BoxLayout:
             size_hint_y: None
             height: '50dp'
-            on_release: root.add_new_folder()
+            spacing: 5
+
+            Button:
+                text: 'Add New Folder'
+                on_release: root.add_new_folder()
+
+            Button:
+                text: 'Settings'
+                size_hint_x: 0.4
+                on_release: root.open_settings()
 
 <FolderScreen>:
     deck_list: deck_list
@@ -1103,6 +1616,10 @@ kv_content = """
                 on_release: root.import_cards()
 
             Button:
+                text: 'Export Deck'
+                on_release: root.export_deck()
+
+            Button:
                 text: 'Bulk Reset'
                 on_release: root.bulk_reset()
 
@@ -1120,11 +1637,11 @@ kv_content = """
                 on_release: root.start_study_session()
 
             Button:
-                text: "Study Don't Know Cards"
+                text: "{btn_study_dont_know}"
                 on_release: root.study_dont_know()
 
             Button:
-                text: 'Flip Deck (Answer First)'
+                text: "{btn_flip_deck}"
                 on_release: root.flip_deck()
 
 <ImportCardsScreen>:
@@ -1148,31 +1665,72 @@ kv_content = """
                 text: 'Import Cards'
                 font_size: '20sp'
 
-        ScrollView:
-            do_scroll_x: False
-            do_scroll_y: True
-            bar_width: 10
+        BoxLayout:
+            orientation: 'vertical'
             size_hint_y: 0.7
-            FileChooserListView:
-                id: file_chooser
-                size_hint_y: 1
+            spacing: 5
+            
+            # Android: Show file picker button
+            Button:
+                text: 'Select File'
+                size_hint_y: None
+                height: '60dp' if root.is_android else 0
+                opacity: 1 if root.is_android else 0
+                disabled: not root.is_android
+                on_release: root.open_file_picker_android() if root.is_android else None
+            
+            Label:
+                id: selected_file_label
+                text: 'No file selected'
+                size_hint_y: None
+                height: '40dp' if root.is_android else 0
+                opacity: 1 if root.is_android else 0
+            
+                # Desktop: Show file chooser in ScrollView
+            ScrollView:
+                do_scroll_x: False
+                do_scroll_y: True
+                bar_width: 10
+                size_hint_y: 1 if not root.is_android else 0
+                opacity: 1 if not root.is_android else 0
+                
+                FileChooserListView:
+                    id: file_chooser
+                    size_hint_y: None
+                    height: 400
+                    dirselect: False
+                    filters: ['*.txt', '*.json', '*']
+                    on_selection: root.on_desktop_selection(self.selection)
 
         BoxLayout:
             orientation: 'vertical'
             size_hint_y: 0.4
             spacing: 5
 
+            # Separator input - only visible if NOT a JSON file
             Label:
                 text: 'Separator Character:'
                 size_hint_y: None
-                height: '30dp'
+                height: '30dp' if not root.is_json_selected else 0
+                opacity: 1 if not root.is_json_selected else 0
+                disabled: root.is_json_selected
 
             TextInput:
                 id: separator_input
                 text: ';'
                 multiline: False
                 size_hint_y: None
-                height: '40dp'
+                height: '40dp' if not root.is_json_selected else 0
+                opacity: 1 if not root.is_json_selected else 0
+                disabled: root.is_json_selected
+            
+            # JSON Info label - only visible if JSON IS selected
+            Label:
+                text: 'JSON Deck Import Selected'
+                color: 0, 1, 0, 1  # Green color
+                size_hint_y: None
+                height: '30dp' if root.is_json_selected else 0
+                opacity: 1 if root.is_json_selected else 0
 
             BoxLayout:
                 orientation: 'horizontal'
@@ -1215,11 +1773,21 @@ kv_content = """
             Label:
                 id: progress_label
                 text: 'Card 0 of 0'
-                size_hint_x: 0.7
+                size_hint_x: 0.5
+
+            Button:
+                text: 'A-'
+                size_hint_x: 0.15
+                on_release: root.decrease_font_size()
+
+            Button:
+                text: 'A+'
+                size_hint_x: 0.15
+                on_release: root.increase_font_size()
 
             Button:
                 text: 'Exit'
-                size_hint_x: 0.3
+                size_hint_x: 0.2
                 on_release: root.show_summary()
 
         Label:
@@ -1230,6 +1798,7 @@ kv_content = """
             valign: 'middle'
             text_size: self.width, None
             size_hint_y: 0.8
+            font_size: '28sp'
 
         BoxLayout:
             size_hint_y: None
@@ -1237,11 +1806,11 @@ kv_content = """
             spacing: 10
 
             Button:
-                text: 'Flip Card (Space)'
+                text: "{btn_flip}"
                 on_release: root.flip_card()
 
             Button:
-                text: 'Go Back (B)'
+                text: "{btn_go_back}"
                 on_release: root.go_back()
 
         BoxLayout:
@@ -1250,11 +1819,11 @@ kv_content = """
             spacing: 10
 
             Button:
-                text: 'Know (K)'
+                text: "{btn_know}"
                 on_release: root.mark_card('know')
 
             Button:
-                text: "Don't Know (D)"
+                text: "{btn_dont_know}"
                 on_release: root.mark_card('dont_know')
 
         BoxLayout:
@@ -1269,13 +1838,10 @@ kv_content = """
         Label:
             size_hint_y: None
             height: '30dp'
-            text: 'Shortcuts: Space to flip, K for Know, D for Don\\'t Know, B to go back'
+            text: "{hint_text}"
             font_size: '12sp'
 """
 
 # Run the app
 if __name__ == "__main__":
-    from kivy.lang import Builder
-
-    Builder.load_string(kv_content)
     FlashcardApp().run()
