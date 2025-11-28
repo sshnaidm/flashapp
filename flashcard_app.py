@@ -8,12 +8,110 @@ from kivy.uix.screenmanager import ScreenManager, Screen
 from kivy.uix.popup import Popup
 from kivy.uix.filechooser import FileChooserListView
 from kivy.core.window import Window
-from kivy.properties import ObjectProperty, StringProperty
+from kivy.properties import ObjectProperty, StringProperty, BooleanProperty
 from kivy.uix.checkbox import CheckBox  # noqa: F401 - Used in kv file
 import json
 import os
 import re
 from kivy.utils import platform
+from kivy.clock import mainthread
+
+# Android Helpers
+if platform == "android":
+    from jnius import autoclass, cast
+    from android import activity
+
+    def android_get_file_from_content_uri(content_uri):
+        """
+        Copies a file from a content URI (content://...) to a local file in the app's private storage.
+        This bypasses issues with direct file access and 'msf:' style IDs on newer Androids.
+        """
+        try:
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            Context = autoclass("android.content.Context")
+            current_activity = cast("android.app.Activity", PythonActivity.mActivity)
+            content_resolver = current_activity.getContentResolver()
+
+            # Open input stream
+            input_stream = content_resolver.openInputStream(content_uri)
+            if not input_stream:
+                return None
+
+            # Try to get the filename
+            file_name = "imported_file"
+            cursor = content_resolver.query(content_uri, None, None, None, None)
+            if cursor:
+                if cursor.moveToFirst():
+                    idx = cursor.getColumnIndex("_display_name")
+                    if idx != -1:
+                        file_name = cursor.getString(idx)
+                cursor.close()
+
+            # Ensure safe filename
+            file_name = os.path.basename(file_name)
+
+            # Define destination path in app's private storage
+            app_root = App.get_running_app().user_data_dir
+            dest_path = os.path.join(app_root, file_name)
+
+            # Copy data
+            output_stream = open(dest_path, "wb")
+            buffer_size = 4096
+            buffer = bytearray(buffer_size)
+
+            while True:
+                bytes_read = input_stream.read(buffer)
+                if bytes_read == -1:
+                    break
+                output_stream.write(buffer[:bytes_read])
+
+            output_stream.close()
+            input_stream.close()
+
+            return dest_path
+        except Exception as e:
+            print(f"Error resolving Android URI: {e}")
+            return None
+
+    class AndroidFilePicker:
+        """
+        Custom file picker to replace plyer which crashes on some Samsung/Android 11+ devices
+        due to NumberFormatException in URI parsing.
+        """
+
+        def __init__(self, callback):
+            self.callback = callback
+            self.RESULT_CODE = 12345
+            activity.bind(on_activity_result=self.on_activity_result)
+
+        def open_picker(self):
+            Intent = autoclass("android.content.Intent")
+            intent = Intent(Intent.ACTION_GET_CONTENT)
+            intent.setType("*/*")
+            intent.addCategory(Intent.CATEGORY_OPENABLE)
+
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            current_activity = cast("android.app.Activity", PythonActivity.mActivity)
+            current_activity.startActivityForResult(intent, self.RESULT_CODE)
+
+        def on_activity_result(self, request_code, result_code, intent):
+            if request_code == self.RESULT_CODE:
+                activity.unbind(on_activity_result=self.on_activity_result)
+                if result_code == -1:  # Activity.RESULT_OK
+                    uri = intent.getData()
+                    if uri:
+                        file_path = android_get_file_from_content_uri(uri)
+                        if file_path:
+                            self.callback([file_path])
+                        else:
+                            self.callback([])  # Failed to resolve
+                    else:
+                        self.callback([])
+                else:
+                    self.callback([])  # Cancelled
+                return True
+            return False
+
 
 # Data models
 
@@ -468,13 +566,85 @@ class FolderScreen(Screen):
         content = BoxLayout(orientation="vertical", padding=10, spacing=10)
         txt_input = TextInput(hint_text="New Deck Name", multiline=False)
         sep_input = TextInput(hint_text="Separator (default: ;)", multiline=False, text=";")
-        file_chooser = FileChooserListView(path=os.path.expanduser("~"))
+        sep_label = Label(text="Enter separator character:", size_hint_y=None, height="30dp")
 
-        content.add_widget(Label(text="Select a text file to import:"))
-        content.add_widget(file_chooser)
-        content.add_widget(Label(text="Enter separator character:"))
+        # Container to hold selected file path (list to allow modification in closure)
+        selected_file_holder = [None]
+        file_chooser = None  # Will be used only on desktop
+
+        def update_ui_for_file(filepath):
+            if not filepath:
+                return
+            is_json = filepath.lower().endswith(".json")
+
+            # Show/hide separator inputs based on file type
+            if is_json:
+                sep_label.height = 0
+                sep_label.opacity = 0
+                sep_input.height = 0
+                sep_input.opacity = 0
+                sep_input.disabled = True
+            else:
+                sep_label.height = 30  # 30dp
+                sep_label.opacity = 1
+                sep_input.height = 40  # 40dp (default TextInput height)
+                sep_input.opacity = 1
+                sep_input.disabled = False
+
+        if platform == "android":
+            # Android: Use native file picker
+            file_label = Label(text="No file selected", size_hint_y=None, height="40dp")
+
+            def on_android_selection(selection):
+                if selection:
+                    selected_file_holder[0] = selection[0]
+
+                    # Update UI on main thread
+                    @mainthread
+                    def update_label():
+                        try:
+                            filepath = selection[0]
+                            file_label.text = f"Selected: {os.path.basename(filepath)}"
+                            update_ui_for_file(filepath)
+                        except Exception:
+                            file_label.text = "File selected"
+
+                    update_label()
+
+            def open_picker(instance):
+                try:
+                    # Use custom AndroidFilePicker instead of plyer
+                    # We define the picker instance here
+                    picker = AndroidFilePicker(on_android_selection)
+                    picker.open_picker()
+                    # Keep reference to prevent GC until callback
+                    instance.picker_ref = picker
+                except Exception as e:
+                    file_label.text = "Error opening file picker"
+                    print(f"Error: {e}")
+
+            btn_select = Button(text="Select File", size_hint_y=None, height="50dp")
+            btn_select.bind(on_release=open_picker)
+
+            content.add_widget(Label(text="Select a text/JSON file:", size_hint_y=None, height="30dp"))
+            content.add_widget(btn_select)
+            content.add_widget(file_label)
+        else:
+            # Desktop: Use FileChooserListView
+            file_chooser = FileChooserListView(path=os.path.expanduser("~"), filters=["*.txt", "*.json", "*"])
+            content.add_widget(Label(text="Select a text file to import:"))
+            content.add_widget(file_chooser)
+
+            # Bind desktop selection
+            def on_desktop_selection(instance, selection):
+                if selection:
+                    update_ui_for_file(selection[0])
+
+            file_chooser.bind(selection=on_desktop_selection)
+
+        content.add_widget(sep_label)
         content.add_widget(sep_input)
-        content.add_widget(Label(text="Enter deck name:"))
+        content.add_widget(Label(text="Enter deck name:", size_hint_y=None, height="30dp"))
         content.add_widget(txt_input)
 
         btn_layout = BoxLayout(size_hint_y=None, height=50, spacing=5)
@@ -482,7 +652,13 @@ class FolderScreen(Screen):
         popup = Popup(title="Import Cards to New Deck", content=content, size_hint=(0.9, 0.9))
 
         def on_submit(instance):
-            if not file_chooser.selection:
+            file_path = None
+            if platform == "android":
+                file_path = selected_file_holder[0]
+            elif file_chooser and file_chooser.selection:
+                file_path = file_chooser.selection[0]
+
+            if not file_path:
                 return
 
             if not txt_input.text.strip():
@@ -491,7 +667,7 @@ class FolderScreen(Screen):
             separator = sep_input.text.strip() or ";"
 
             imported = self.data_manager.import_cards_as_new_deck(
-                self.folder_index, txt_input.text.strip(), file_chooser.selection[0], separator
+                self.folder_index, txt_input.text.strip(), file_path, separator
             )
 
             if imported > 0:
@@ -528,26 +704,82 @@ class ImportCardsScreen(Screen):
     file_chooser = ObjectProperty(None)
     folder_index = -1
     deck_index = -1
+    is_android = BooleanProperty(platform == "android")
+    is_json_selected = BooleanProperty(False)
 
     def __init__(self, **kwargs):
         super(ImportCardsScreen, self).__init__(**kwargs)
         self.data_manager = App.get_running_app().data_manager
+        self.selected_file_path = None
 
     def on_enter(self):
-        # Set default path based on platform
-        if platform == "android":
-            # On Android, start at external storage root (usually /storage/emulated/0)
-            self.file_chooser.path = "/storage/emulated/0"
-        else:
-            # On desktop, start at user's home directory
-            self.file_chooser.path = os.path.expanduser("~")
+        # Reset selection
+        self.selected_file_path = None
+        self.is_json_selected = False
 
-    def import_cards(self, file_path, separator, create_new_deck, deck_name):
-        if not file_path:
-            self.show_error("Please select a file.")
+        # Set default path based on platform
+        if not self.is_android:
+            # On desktop, start at user's home directory
+            if self.file_chooser:
+                self.file_chooser.path = os.path.expanduser("~")
+        else:
+            # On Android, update UI to show file selection status
+            if hasattr(self, "ids") and "selected_file_label" in self.ids:
+                self.ids.selected_file_label.text = "No file selected - Tap 'Select File' button"
+
+    def on_desktop_selection(self, selection):
+        """Handle desktop file selection change"""
+        if selection:
+            self.is_json_selected = selection[0].lower().endswith(".json")
+        else:
+            self.is_json_selected = False
+
+    def open_file_picker_android(self):
+        """Open native Android file picker"""
+        try:
+            # Use custom AndroidFilePicker instead of plyer
+            self.android_picker = AndroidFilePicker(self.handle_android_selection)
+            self.android_picker.open_picker()
+        except Exception as e:
+            self.show_error(f"Error opening file picker: {str(e)}")
+
+    @mainthread
+    def handle_android_selection(self, selection):
+        """Handle file selection from Android native picker"""
+        if not selection:
+            # Debugging: let user know if we got an empty selection
+            self.show_error("File picker returned no selection. Try picking a file from internal storage.")
             return
 
-        selected_file = file_path[0]
+        if selection:
+            # plyer returns a list of paths
+            self.selected_file_path = selection[0]
+
+            # Check if it is a JSON file
+            self.is_json_selected = self.selected_file_path.lower().endswith(".json")
+
+            # Update the label to show selected file
+            try:
+                filename = os.path.basename(self.selected_file_path)
+                if hasattr(self, "ids") and "selected_file_label" in self.ids:
+                    self.ids.selected_file_label.text = f"Selected: {filename}"
+            except Exception as e:
+                self.show_error(f"Error processing file selection: {str(e)}")
+
+    def import_cards(self, file_path, separator, create_new_deck, deck_name):
+        # On Android, use the selected file from native picker
+        if platform == "android":
+            if not self.selected_file_path:
+                self.show_error("Please select a file first.")
+                return
+            selected_file = self.selected_file_path
+        else:
+            # On desktop, use file_chooser selection
+            if not file_path:
+                self.show_error("Please select a file.")
+                return
+            selected_file = file_path[0]
+
         is_json = selected_file.lower().endswith(".json")
 
         if create_new_deck and not deck_name.strip() and not is_json:
@@ -1433,33 +1665,72 @@ kv_content = f"""
                 text: 'Import Cards'
                 font_size: '20sp'
 
-        ScrollView:
-            do_scroll_x: False
-            do_scroll_y: True
-            bar_width: 10
+        BoxLayout:
+            orientation: 'vertical'
             size_hint_y: 0.7
-            FileChooserListView:
-                id: file_chooser
-                size_hint_y: 1
-                dirselect: False
-                filters: ['*.txt', '*.json', '*']
+            spacing: 5
+            
+            # Android: Show file picker button
+            Button:
+                text: 'Select File'
+                size_hint_y: None
+                height: '60dp' if root.is_android else 0
+                opacity: 1 if root.is_android else 0
+                disabled: not root.is_android
+                on_release: root.open_file_picker_android() if root.is_android else None
+            
+            Label:
+                id: selected_file_label
+                text: 'No file selected'
+                size_hint_y: None
+                height: '40dp' if root.is_android else 0
+                opacity: 1 if root.is_android else 0
+            
+                # Desktop: Show file chooser in ScrollView
+            ScrollView:
+                do_scroll_x: False
+                do_scroll_y: True
+                bar_width: 10
+                size_hint_y: 1 if not root.is_android else 0
+                opacity: 1 if not root.is_android else 0
+                
+                FileChooserListView:
+                    id: file_chooser
+                    size_hint_y: None
+                    height: 400
+                    dirselect: False
+                    filters: ['*.txt', '*.json', '*']
+                    on_selection: root.on_desktop_selection(self.selection)
 
         BoxLayout:
             orientation: 'vertical'
             size_hint_y: 0.4
             spacing: 5
 
+            # Separator input - only visible if NOT a JSON file
             Label:
                 text: 'Separator Character:'
                 size_hint_y: None
-                height: '30dp'
+                height: '30dp' if not root.is_json_selected else 0
+                opacity: 1 if not root.is_json_selected else 0
+                disabled: root.is_json_selected
 
             TextInput:
                 id: separator_input
                 text: ';'
                 multiline: False
                 size_hint_y: None
-                height: '40dp'
+                height: '40dp' if not root.is_json_selected else 0
+                opacity: 1 if not root.is_json_selected else 0
+                disabled: root.is_json_selected
+            
+            # JSON Info label - only visible if JSON IS selected
+            Label:
+                text: 'JSON Deck Import Selected'
+                color: 0, 1, 0, 1  # Green color
+                size_hint_y: None
+                height: '30dp' if root.is_json_selected else 0
+                opacity: 1 if root.is_json_selected else 0
 
             BoxLayout:
                 orientation: 'horizontal'

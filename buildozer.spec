@@ -20,7 +20,7 @@ orientation = landscape, portrait, portrait-reverse, landscape-reverse
 # python-for-android can build it from source, causing architecture mismatch errors.
 # The SDL2 bootstrap automatically includes Kivy and builds it correctly for ARM.
 # See: ANDROID_FIX_SUMMARY.md and ARCHITECTURE_FIX.md for details
-requirements = python3,kivy,docutils,pygments,pillow
+requirements = python3,kivy,docutils,pygments,pillow,plyer,pyjnius
 
 # Android specific
 # READ_EXTERNAL_STORAGE: Required for file import functionality
@@ -64,7 +64,7 @@ android.archs = arm64-v8a, armeabi-v7a
 # (int) overrides automatic versionCode computation (used in build.gradle)
 # This must be incremented with each new build for upgrades to work
 # Current: 1 (increment to 2, 3, 4... for each new build)
-android.numeric_version = 1
+android.numeric_version = 5
 
 [buildozer]
 # (int) Log level (0 = error only, 1 = info, 2 = debug (with command output))
